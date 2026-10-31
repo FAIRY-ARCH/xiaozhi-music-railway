@@ -1,6 +1,7 @@
 // xiaozhi-music-bridge (event-driven)
 // 桥接：小智 MCP 中继 <-> 上游音乐 MCP WebSocket 服务器（双向转发 JSON-RPC 消息）
 // 注意：Deno Deploy 运行时 WebSocket 不支持异步迭代（for await），必须用 onmessage/onclose/onerror 事件驱动。
+// v3: 本地应答 ping、吞掉 notifications/*，避免上游 -32601 错误应答导致中继关闭会话。
 const RELAY_URL = Deno.env.get("RELAY_URL");
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") ?? "wss://xiaozhi-music-railway.fairy-arch.deno.net";
 if (!RELAY_URL) {
@@ -30,7 +31,7 @@ function fmt(data) {
 }
 
 function maybeLog(dir, data) {
-  if (logLimit[dir] >= 6) return;
+  if (logLimit[dir] >= 8) return;
   logLimit[dir] += 1;
   let t = fmt(data);
   if (t.length > 500) t = t.slice(0, 500) + "...";
@@ -58,8 +59,23 @@ function connectRelay() {
   relayWs.onmessage = (e) => {
     state.msgsRelayToUp += 1;
     maybeLog("r2u", e.data);
+    const text = fmt(e.data);
+    try {
+      const obj = JSON.parse(text);
+      const method = obj && obj.method;
+      const noId = !obj || typeof obj.id === "undefined" || obj.id === null;
+      if (method === "ping") {
+        relayWs.send(JSON.stringify({ jsonrpc: "2.0", id: obj.id, result: {} }));
+        console.log("[r2u-pong] ping answered locally");
+        return;
+      }
+      if (noId && method && method.startsWith("notifications/")) {
+        console.log("[r2u-notif] " + method + " swallowed locally");
+        return;
+      }
+    } catch (_) {}
     if (upWs && upOpen) {
-      try { upWs.send(e.data); } catch (err) { console.error("send to upstream: " + err); }
+      try { upWs.send(text); } catch (err) { console.error("send to upstream: " + err); }
     } else {
       console.error("upstream not open, dropping relay msg");
     }
