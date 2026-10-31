@@ -3,7 +3,7 @@
 // 注意：Deno Deploy 运行时 WebSocket 不支持异步迭代（for await），必须用 onmessage/onclose/onerror 事件驱动。
 // v3: 本地应答 ping、吞掉 notifications/*，避免上游 -32601 错误应答导致中继关闭会话。
 // v4: 修复 /state 状态字段在连接打开时仍显示 opening；新增每分钟保活定时任务。
-// v4.1: 保活 handler 内保持约50秒活动，让实例持续存活、中继连接不断（免费层实例寿命约60秒）。
+// v4.2: 保活 handler 内保持约65秒活动（超过每分钟tick周期），前后实例重叠实现连续覆盖。
 const RELAY_URL = Deno.env.get("RELAY_URL");
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") ?? "wss://xiaozhi-music-railway.fairy-arch.deno.net";
 if (!RELAY_URL) {
@@ -146,12 +146,12 @@ Deno.serve((req) => {
   return new Response("not found", { status: 404 });
 });
 
-// 保活：免费层实例空闲即被回收（中继连接随实例销毁）。每分钟定时唤醒，并在 handler 内保持约50秒活动，使实例持续存活、中继连接不断。
+// 保活：免费层实例空闲即被回收（中继连接随实例销毁）。每分钟定时唤醒，并在 handler 内保持约65秒活动（超过每分钟tick周期），前后实例重叠实现连续覆盖。
 const MUSIC_HEALTH = UPSTREAM_URL.replace(/^wss/, "https") + "/health";
 if (typeof Deno.cron === "function") {
   Deno.cron("keepalive", "*/1 * * * *", async () => {
     console.log("[keepalive] tick");
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
       try {
         await fetch(MUSIC_HEALTH, { signal: AbortSignal.timeout(5000) });
       } catch (_) {}
