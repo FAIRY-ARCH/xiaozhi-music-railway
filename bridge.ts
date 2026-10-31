@@ -16,8 +16,6 @@ const state = {
   lastConnect: 0,
   msgsRelayToUp: 0,
   msgsUpToRelay: 0,
-  probeHttp: "",
-  probeAt: 0,
 };
 
 function open(ws, name, timeoutMs) {
@@ -34,33 +32,30 @@ function open(ws, name, timeoutMs) {
   });
 }
 
-async function pipe(src, dst, name) {
-  for await (const msg of src) {
-    if (typeof msg === "string") {
-      dst.send(msg);
-    } else {
-      dst.send(await new Response(msg).text());
-    }
-    if (name === "relay") state.msgsRelayToUp++; else state.msgsUpToRelay++;
-  }
-}
-
-// 定时探测中继主机可达性（区分“主机不可达/被墙”与“仅WS握手受阻”）
-async function probeRelay() {
-  try {
-    const t = Date.now();
-    const resp = await fetch("https://api.xiaozhi.me/", { signal: AbortSignal.timeout(8000) });
-    state.probeHttp = "status=" + resp.status + " took=" + (Date.now() - t) + "ms";
-  } catch (e) {
-    state.probeHttp = "FAIL " + String(e && e.message ? e.message : e);
-  }
-  state.probeAt = Date.now();
+// 事件驱动的双向转发（Deno Deploy 运行时 WebSocket 不支持 for await 异步迭代器）
+function pipe(src, dst, name) {
+  return new Promise((resolve) => {
+    src.onmessage = (e) => {
+      const data = e.data;
+      try {
+        if (typeof data === "string") {
+          dst.send(data);
+        } else if (data instanceof Blob) {
+          data.arrayBuffer().then((b) => dst.send(b));
+        } else {
+          dst.send(data);
+        }
+        if (name === "relay") state.msgsRelayToUp++; else state.msgsUpToRelay++;
+      } catch (err) {
+        state.lastError = "pipe send err: " + String(err && err.message ? err.message : err);
+      }
+    };
+    src.onclose = () => resolve();
+    src.onerror = () => resolve();
+  });
 }
 
 async function runBridge() {
-  // 立即探活一次，之后每 30s 一次
-  probeRelay();
-  setInterval(probeRelay, 30000);
   for (;;) {
     let relay;
     let up;
