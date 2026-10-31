@@ -7,6 +7,8 @@ if (!RELAY_URL) {
   Deno.exit(1);
 }
 
+const kv = await Deno.openKv();
+
 // 诊断状态
 const state = {
   relay: "not-started",
@@ -16,19 +18,28 @@ const state = {
   lastConnect: 0,
   msgsRelayToUp: 0,
   msgsUpToRelay: 0,
+  bootAt: Date.now(),
 };
+
+async function saveState() {
+  try {
+    await kv.set(["bridge", "state"], { ...state, savedAt: Date.now() });
+  } catch {}
+}
 
 function open(ws, name, timeoutMs) {
   return new Promise((resolve, reject) => {
     state[name] = "opening";
+    saveState();
     const timer = setTimeout(() => {
       state[name] = "timeout";
       state.lastError = name + " open timeout";
+      saveState();
       try { ws.close(); } catch {}
       reject(new Error(name + " open timeout"));
     }, timeoutMs);
-    ws.onopen = () => { clearTimeout(timer); state[name] = "open"; resolve(); };
-    ws.onerror = (e) => { clearTimeout(timer); state[name] = "error"; state.lastError = name + " open failed"; reject(new Error(name + " open failed")); };
+    ws.onopen = () => { clearTimeout(timer); state[name] = "open"; saveState(); resolve(); };
+    ws.onerror = (e) => { clearTimeout(timer); state[name] = "error"; state.lastError = name + " open failed"; saveState(); reject(new Error(name + " open failed")); };
   });
 }
 
@@ -48,10 +59,11 @@ function pipe(src, dst, name) {
         if (name === "relay") state.msgsRelayToUp++; else state.msgsUpToRelay++;
       } catch (err) {
         state.lastError = "pipe send err: " + String(err && err.message ? err.message : err);
+        saveState();
       }
     };
-    src.onclose = () => resolve();
-    src.onerror = () => resolve();
+    src.onclose = () => { saveState(); resolve(); };
+    src.onerror = () => { saveState(); resolve(); };
   });
 }
 
@@ -66,24 +78,30 @@ async function runBridge() {
       up = new WebSocket(UPSTREAM_URL);
       await Promise.all([open(relay, "relay", 12000), open(up, "upstream", 12000)]);
       console.log("bridge connected: relay + upstream");
+      saveState();
       await Promise.race([pipe(relay, up, "relay"), pipe(up, relay, "upstream")]);
     } catch (err) {
       state.lastError = String(err && err.message ? err.message : err);
       console.error("bridge error:", err);
+      saveState();
     } finally {
       try { relay?.close(); } catch {}
       try { up?.close(); } catch {}
       state.relay = "closed";
       state.upstream = "closed";
+      saveState();
     }
     await new Promise((r) => setTimeout(r, 3000));
   }
 }
 
-Deno.serve((req) => {
+Deno.serve(async (req) => {
   const url = new URL(req.url);
   if (url.pathname === "/health") return new Response("ok");
-  if (url.pathname === "/state") return Response.json(state);
+  if (url.pathname === "/state") {
+    const res = await kv.get(["bridge", "state"]);
+    return Response.json(res.value ?? { none: true });
+  }
   return new Response("xiaozhi-music-bridge running", { status: 200 });
 });
 runBridge();
