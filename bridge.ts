@@ -2,6 +2,7 @@
 // 桥接：小智 MCP 中继 <-> 上游音乐 MCP WebSocket 服务器（双向转发 JSON-RPC 消息）
 // 注意：Deno Deploy 运行时 WebSocket 不支持异步迭代（for await），必须用 onmessage/onclose/onerror 事件驱动。
 // v3: 本地应答 ping、吞掉 notifications/*，避免上游 -32601 错误应答导致中继关闭会话。
+// v4: 修复 /state 状态字段在连接打开时仍显示 opening；新增每分钟保活定时任务（免费层实例空闲约1-3分钟即被回收，中继连接随实例销毁，需定时唤醒保持在线）。
 const RELAY_URL = Deno.env.get("RELAY_URL");
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") ?? "wss://xiaozhi-music-railway.fairy-arch.deno.net";
 if (!RELAY_URL) {
@@ -53,6 +54,7 @@ function connectRelay() {
   }
   relayWs.onopen = () => {
     relayOpen = true;
+    state.relay = "open";
     console.log("relay open");
     if (upOpen) console.log("bridge connected: relay + upstream");
   };
@@ -106,6 +108,7 @@ function connectUpstream() {
   }
   upWs.onopen = () => {
     upOpen = true;
+    state.upstream = "open";
     console.log("upstream open");
     if (relayOpen) console.log("bridge connected: relay + upstream");
   };
@@ -141,6 +144,13 @@ Deno.serve((req) => {
   }
   return new Response("not found", { status: 404 });
 });
+
+// 保活：免费层实例空闲约1-3分钟即被回收（中继连接随实例销毁），每分钟定时唤醒保持在线
+if (typeof Deno.cron === "function") {
+  Deno.cron("keepalive", "*/1 * * * *", () => {
+    console.log("[keepalive] tick");
+  });
+}
 
 console.log("bridge starting, relay host=" + new URL(RELAY_URL).host + " upstream=" + UPSTREAM_URL);
 connectRelay();
