@@ -2,7 +2,8 @@
 // 桥接：小智 MCP 中继 <-> 上游音乐 MCP WebSocket 服务器（双向转发 JSON-RPC 消息）
 // 注意：Deno Deploy 运行时 WebSocket 不支持异步迭代（for await），必须用 onmessage/onclose/onerror 事件驱动。
 // v3: 本地应答 ping、吞掉 notifications/*，避免上游 -32601 错误应答导致中继关闭会话。
-// v4: 修复 /state 状态字段在连接打开时仍显示 opening；新增每分钟保活定时任务（免费层实例空闲约1-3分钟即被回收，中继连接随实例销毁，需定时唤醒保持在线）。
+// v4: 修复 /state 状态字段在连接打开时仍显示 opening；新增每分钟保活定时任务。
+// v4.1: 保活 handler 内保持约50秒活动，让实例持续存活、中继连接不断（免费层实例寿命约60秒）。
 const RELAY_URL = Deno.env.get("RELAY_URL");
 const UPSTREAM_URL = Deno.env.get("UPSTREAM_URL") ?? "wss://xiaozhi-music-railway.fairy-arch.deno.net";
 if (!RELAY_URL) {
@@ -145,10 +146,17 @@ Deno.serve((req) => {
   return new Response("not found", { status: 404 });
 });
 
-// 保活：免费层实例空闲约1-3分钟即被回收（中继连接随实例销毁），每分钟定时唤醒保持在线
+// 保活：免费层实例空闲即被回收（中继连接随实例销毁）。每分钟定时唤醒，并在 handler 内保持约50秒活动，使实例持续存活、中继连接不断。
+const MUSIC_HEALTH = UPSTREAM_URL.replace(/^wss/, "https") + "/health";
 if (typeof Deno.cron === "function") {
-  Deno.cron("keepalive", "*/1 * * * *", () => {
+  Deno.cron("keepalive", "*/1 * * * *", async () => {
     console.log("[keepalive] tick");
+    for (let i = 0; i < 5; i++) {
+      try {
+        await fetch(MUSIC_HEALTH, { signal: AbortSignal.timeout(5000) });
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 10000));
+    }
   });
 }
 
